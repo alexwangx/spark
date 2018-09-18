@@ -212,7 +212,8 @@ case class XPathList(xml: Expression, path: Expression) extends XPathExtract {
       }
       new GenericArrayData(ret)
     } else {
-      null
+      new GenericArrayData(new Array[UTF8String](0))
+//      null
     }
   }
 }
