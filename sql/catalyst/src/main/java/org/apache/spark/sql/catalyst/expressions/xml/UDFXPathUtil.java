@@ -57,7 +57,8 @@ public class UDFXPathUtil {
         try {
           expression = xpath.compile(path);
         } catch (XPathExpressionException e) {
-          throw new RuntimeException("Invalid XPath '" + path + "'" + e.getMessage(), e);
+//          throw new RuntimeException("Invalid XPath '" + path + "'" + e.getMessage(), e);
+          expression = null;
         }
         oldPath = path;
       }
