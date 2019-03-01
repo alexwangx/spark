@@ -42,7 +42,10 @@ case class SortMergeJoinExec(
     right: SparkPlan) extends BinaryExecNode with CodegenSupport {
 
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "numLeftNullRows" -> SQLMetrics.createMetric(sparkContext, "number of left null rows"),
+    "numRightNullRows" -> SQLMetrics.createMetric(sparkContext, "number of right null rows"))
+
 
   override def output: Seq[Attribute] = {
     joinType match {
@@ -145,6 +148,8 @@ case class SortMergeJoinExec(
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
+    val numLeftNullRows = longMetric("numLeftNullRows")
+    val numRightNullRows = longMetric("numRightNullRows")
     val spillThreshold = getSpillThreshold
     val inMemoryThreshold = getInMemoryThreshold
     left.execute().zipPartitions(right.execute()) { (leftIter, rightIter) =>
@@ -221,7 +226,7 @@ case class SortMergeJoinExec(
           )
           val rightNullRow = new GenericInternalRow(right.output.length)
           new LeftOuterIterator(
-            smjScanner, rightNullRow, boundCondition, resultProj, numOutputRows).toScala
+            smjScanner, rightNullRow, boundCondition, resultProj, numOutputRows,numRightNullRows).toScala
 
         case RightOuter =>
           val smjScanner = new SortMergeJoinScanner(
@@ -235,7 +240,7 @@ case class SortMergeJoinExec(
           )
           val leftNullRow = new GenericInternalRow(left.output.length)
           new RightOuterIterator(
-            smjScanner, leftNullRow, boundCondition, resultProj, numOutputRows).toScala
+            smjScanner, leftNullRow, boundCondition, resultProj, numOutputRows,numLeftNullRows).toScala
 
         case FullOuter =>
           val leftNullRow = new GenericInternalRow(left.output.length)
@@ -248,7 +253,9 @@ case class SortMergeJoinExec(
             rightIter = RowIterator.fromScala(rightIter),
             boundCondition,
             leftNullRow,
-            rightNullRow)
+            rightNullRow,
+            numLeftNullRows,
+            numRightNullRows)
 
           new FullOuterIterator(
             smjScanner,
@@ -688,6 +695,8 @@ private[joins] class SortMergeJoinScanner(
 
   def getStreamedRow: InternalRow = streamedRow
 
+  def getStreamedRowKey: InternalRow = streamedRowKey
+
   def getBufferedMatches: ExternalAppendOnlyUnsafeRowArray = bufferedMatches
 
   /**
@@ -848,9 +857,10 @@ private class LeftOuterIterator(
     rightNullRow: InternalRow,
     boundCondition: InternalRow => Boolean,
     resultProj: InternalRow => InternalRow,
-    numOutputRows: SQLMetric)
+    numOutputRows: SQLMetric,
+    numRightNullRows: SQLMetric)
   extends OneSideOuterIterator(
-    smjScanner, rightNullRow, boundCondition, resultProj, numOutputRows) {
+    smjScanner, rightNullRow, boundCondition, resultProj, numOutputRows, numRightNullRows) {
 
   protected override def setStreamSideOutput(row: InternalRow): Unit = joinedRow.withLeft(row)
   protected override def setBufferedSideOutput(row: InternalRow): Unit = joinedRow.withRight(row)
@@ -864,8 +874,10 @@ private class RightOuterIterator(
     leftNullRow: InternalRow,
     boundCondition: InternalRow => Boolean,
     resultProj: InternalRow => InternalRow,
-    numOutputRows: SQLMetric)
-  extends OneSideOuterIterator(smjScanner, leftNullRow, boundCondition, resultProj, numOutputRows) {
+    numOutputRows: SQLMetric,
+    numLeftNullRows: SQLMetric)
+  extends OneSideOuterIterator(
+    smjScanner, leftNullRow, boundCondition, resultProj,numOutputRows, numLeftNullRows) {
 
   protected override def setStreamSideOutput(row: InternalRow): Unit = joinedRow.withRight(row)
   protected override def setBufferedSideOutput(row: InternalRow): Unit = joinedRow.withLeft(row)
@@ -892,7 +904,8 @@ private abstract class OneSideOuterIterator(
     bufferedSideNullRow: InternalRow,
     boundCondition: InternalRow => Boolean,
     resultProj: InternalRow => InternalRow,
-    numOutputRows: SQLMetric) extends RowIterator {
+    numOutputRows: SQLMetric,
+    numBufferNullRows: SQLMetric) extends RowIterator {
 
   // A row to store the joined result, reused many times
   protected[this] val joinedRow: JoinedRow = new JoinedRow()
@@ -918,10 +931,16 @@ private abstract class OneSideOuterIterator(
       if (smjScanner.getBufferedMatches.isEmpty) {
         // There are no matching rows in the buffer, so return the null row
         setBufferedSideOutput(bufferedSideNullRow)
+        if (!smjScanner.getStreamedRowKey.anyNull) {
+          numBufferNullRows += 1
+        }
       } else {
         // Find the next row in the buffer that satisfied the bound condition
         if (!advanceBufferUntilBoundConditionSatisfied()) {
           setBufferedSideOutput(bufferedSideNullRow)
+          if (!smjScanner.getStreamedRowKey.anyNull) {
+            numBufferNullRows += 1
+          }
         }
       }
       true
@@ -965,7 +984,9 @@ private class SortMergeFullOuterJoinScanner(
     rightIter: RowIterator,
     boundCondition: InternalRow => Boolean,
     leftNullRow: InternalRow,
-    rightNullRow: InternalRow)  {
+    rightNullRow: InternalRow,
+    numLeftNullRows: SQLMetric,
+    numRightNullRows: SQLMetric)  {
   private[this] val joinedRow: JoinedRow = new JoinedRow()
   private[this] var leftRow: InternalRow = _
   private[this] var leftRowKey: InternalRow = _
@@ -1072,6 +1093,9 @@ private class SortMergeFullOuterJoinScanner(
       if (!leftMatched.get(leftIndex)) {
         // the left row has never matched any right row, join it with null row
         joinedRow(leftMatches(leftIndex), rightNullRow)
+        if(!leftRowKey.anyNull) {
+          numRightNullRows += 1
+        }
         leftIndex += 1
         return true
       }
@@ -1082,6 +1106,9 @@ private class SortMergeFullOuterJoinScanner(
       if (!rightMatched.get(rightIndex)) {
         // the right row has never matched any left row, join it with null row
         joinedRow(leftNullRow, rightMatches(rightIndex))
+        if(!rightRowKey.anyNull) {
+          numLeftNullRows += 1
+        }
         rightIndex += 1
         return true
       }
@@ -1106,10 +1133,16 @@ private class SortMergeFullOuterJoinScanner(
 
     if (leftRow != null && (leftRowKey.anyNull || rightRow == null)) {
       joinedRow(leftRow.copy(), rightNullRow)
+      if(!leftRowKey.anyNull) {
+        numRightNullRows += 1
+      }
       advancedLeft()
       true
     } else if (rightRow != null && (rightRowKey.anyNull || leftRow == null)) {
       joinedRow(leftNullRow, rightRow.copy())
+      if(!rightRowKey.anyNull) {
+        numLeftNullRows += 1
+      }
       advancedRight()
       true
     } else if (leftRow != null && rightRow != null) {

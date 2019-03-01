@@ -48,7 +48,9 @@ case class BroadcastHashJoinExec(
 
   override lazy val metrics = Map(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
-    "avgHashProbe" -> SQLMetrics.createAverageMetric(sparkContext, "avg hash probe"))
+    "avgHashProbe" -> SQLMetrics.createAverageMetric(sparkContext, "avg hash probe"),
+    "numLeftNullRows" -> SQLMetrics.createMetric(sparkContext, "number of left null rows"),
+    "numRightNullRows" -> SQLMetrics.createMetric(sparkContext, "number of right null rows"))
 
   override def requiredChildDistribution: Seq[Distribution] = {
     val mode = HashedRelationBroadcastMode(buildKeys)
@@ -283,6 +285,10 @@ case class BroadcastHashJoinExec(
     val matched = ctx.freshName("matched")
     val buildVars = genBuildSideVars(ctx, matched)
     val numOutput = metricTerm(ctx, "numOutputRows")
+    val numBuildNullRows = buildSide match {
+      case BuildLeft => metricTerm(ctx, "numLeftNullRows")
+      case BuildRight => metricTerm(ctx, "numRightNullRows")
+    }
 
     // filter the output via condition
     val conditionPassed = ctx.freshName("conditionPassed")
@@ -321,6 +327,10 @@ case class BroadcastHashJoinExec(
          |  // reset the variables those are already evaluated.
          |  ${buildVars.filter(_.code == "").map(v => s"${v.isNull} = true;").mkString("\n")}
          |}
+         |if(!$anyNull && $matched == null) {
+         |  $numBuildNullRows.add(1);
+         |}
+         |
          |$numOutput.add(1);
          |${consume(ctx, resultVars)}
        """.stripMargin
@@ -339,6 +349,9 @@ case class BroadcastHashJoinExec(
          |while ($matches != null && $matches.hasNext() || !$found) {
          |  UnsafeRow $matched = $matches != null && $matches.hasNext() ?
          |    (UnsafeRow) $matches.next() : null;
+         |    if(!$anyNull && $matched == null) {
+         |      $numBuildNullRows.add(1);
+         |    }
          |  ${checkCondition.trim}
          |  if ($conditionPassed) {
          |    $found = true;

@@ -73,7 +73,10 @@ trait HashJoin {
     }
   }
 
-
+  protected val numBuildNullRows = buildSide match {
+    case BuildLeft => longMetric("numLeftNullRows")
+    case BuildRight => longMetric("numRightNullRows")
+  }
 
   protected def buildSideKeyGenerator(): Projection =
     UnsafeProjection.create(buildKeys)
@@ -136,6 +139,9 @@ trait HashJoin {
           }
           if (!found) {
             joinedRow.withRight(nullRow)
+            if(!rowKey.anyNull()) {
+              numBuildNullRows += 1
+            }
             found = true
             return true
           }

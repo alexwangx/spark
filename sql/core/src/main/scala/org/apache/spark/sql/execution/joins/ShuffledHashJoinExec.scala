@@ -43,7 +43,10 @@ case class ShuffledHashJoinExec(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
     "buildDataSize" -> SQLMetrics.createSizeMetric(sparkContext, "data size of build side"),
     "buildTime" -> SQLMetrics.createTimingMetric(sparkContext, "time to build hash map"),
-    "avgHashProbe" -> SQLMetrics.createAverageMetric(sparkContext, "avg hash probe"))
+    "avgHashProbe" -> SQLMetrics.createAverageMetric(sparkContext, "avg hash probe"),
+    "numLeftNullRows" -> SQLMetrics.createMetric(sparkContext, "number of left null rows"),
+    "numRightNullRows" -> SQLMetrics.createMetric(sparkContext, "number of right null rows"))
+
 
   override def requiredChildDistribution: Seq[Distribution] =
     HashClusteredDistribution(leftKeys) :: HashClusteredDistribution(rightKeys) :: Nil
